@@ -2,11 +2,14 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import sqlite3
 import datetime
+import os                                     
+os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
 import cv2
 import time
 from pyzbar import pyzbar
 import winsound
 from PIL import Image, ImageTk
+import threading
 
 # --- DATABASE SETUP ---
 class POSDatabase:
@@ -167,7 +170,8 @@ class POSApp:
         action_and_cam_frame.pack(fill="x", pady=5)
 
         # The video feed label (resized to fit the screen nicely)
-        self.lbl_video = tk.Label(action_and_cam_frame, text="Scanner Offline", bg="black", fg="white", width=45, height=12)
+        # The video feed label
+        self.lbl_video = tk.Label(action_and_cam_frame, text="Scanner Offline", bg="black", fg="white")
         self.lbl_video.pack(side="left", padx=(0, 10))
 
         btn_action_frame = tk.Frame(action_and_cam_frame)
@@ -241,74 +245,116 @@ class POSApp:
         # Start the video loop
         self.update_camera_frame()
 
-    # --- TERMINAL EMBEDDED SCANNER ---
+    # --- TERMINAL EMBEDDED SCANNER ---z
     def toggle_terminal_scanner(self):
-        # Check if scanner is currently off
         if not getattr(self, 'scanner_active', False):
             self.scanner_active = True
-            self.btn_toggle_scan.config(text="🛑 Turn Off Scanner", bg="#F44336")
             
-            # Start Camera
-            self.cap = cv2.VideoCapture("http://192.168.1.28:8080/video")
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            # Change button to a safe loading state
+            self.btn_toggle_scan.config(text="⏳ Connecting to Phone...", bg="#FF9800", state="disabled")
+            self.lbl_video.config(text="Connecting to IP Camera...\nPlease wait.", image='')
+            self.current_frame = None  # Reset the frame container
             
-            self.last_scanned = None
-            self.last_scan_time = 0
-            
-            # Begin the loop
-            self.update_terminal_camera()
+            # Start the connection in the background so the app DOES NOT freeze
+            threading.Thread(target=self.connect_camera, daemon=True).start()
         else:
             # Turn it off
             self.scanner_active = False
-            self.btn_toggle_scan.config(text="📷 Turn On Scanner", bg="#00BCD4")
+            self.btn_toggle_scan.config(text="📷 Turn On Scanner", bg="#00BCD4", state="normal")
             if hasattr(self, 'cap') and self.cap.isOpened():
                 self.cap.release()
             self.lbl_video.config(image='', text="Scanner Offline")
 
-    def update_terminal_camera(self):
-        # Stop loop if scanner was toggled off
-        if not getattr(self, 'scanner_active', False) or not self.cap.isOpened():
+    def connect_camera(self):
+        # Connect to FFMPEG in the background
+        camera_url = "http://192.168.1.28:8080/video"
+        self.cap = cv2.VideoCapture(camera_url, cv2.CAP_FFMPEG)
+        
+        # Tell the main app to check if it connected successfully
+        self.root.after(0, self.start_camera_loop)
+
+    def start_camera_loop(self):
+        if not getattr(self, 'scanner_active', False):
             return
 
-        success, frame = self.cap.read()
-        if success:
-            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            decoded_objects = pyzbar.decode(gray_frame)
-
-            for obj in decoded_objects:
-                barcode = obj.data.decode('utf-8')
-                (x, y, w, h) = obj.rect
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-                current_time = time.time()
-                if barcode != self.last_scanned or (current_time - self.last_scan_time) > 1.5:
-                    product = self.db.get_product_by_barcode(barcode)
-                    
-                    if product:
-                        self.last_scanned = barcode
-                        self.last_scan_time = current_time
-                        
-                        # Beep and add to cart directly!
-                        winsound.Beep(1500, 150)
-                        item_id, barcode_val, name, price, stock = product
-                        self.process_cart_addition(item_id, name, price, stock)
-                        
-                        cv2.putText(frame, "ADDED!", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-            # Resize the frame so it fits nicely in our Tkinter UI without stretching the window
-            frame = cv2.resize(frame, (320, 240))
+        if hasattr(self, 'cap') and self.cap.isOpened():
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             
-            # Convert for Tkinter
-            cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(cv2image)
-            imgtk = ImageTk.PhotoImage(image=img)
+            # --- NEW: Prevent memory leaks by limiting the video buffer to 1 frame ---
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # ------------------------------------------------------------------------
 
-            self.lbl_video.imgtk = imgtk
-            self.lbl_video.configure(image=imgtk)
+            self.last_scanned = None
+            self.last_scan_time = 0
+            
+            self.btn_toggle_scan.config(text="🛑 Turn Off Scanner", bg="#F44336", state="normal")
+            
+            threading.Thread(target=self.camera_read_thread, daemon=True).start()
+            self.update_terminal_camera() 
+        else:
+            self.scanner_active = False
+            self.btn_toggle_scan.config(text="📷 Turn On Scanner", bg="#00BCD4", state="normal")
+            self.lbl_video.config(text="Connection Failed!\nCheck Phone IP.")
+            messagebox.showerror("Camera Error", "Could not connect to the phone.")
 
-        # Loop the function every 15 milliseconds
-        self.root.after(15, self.update_terminal_camera)
+    def camera_read_thread(self):
+        # This thread runs as fast as the camera allows to keep the buffer empty
+        while getattr(self, 'scanner_active', False) and self.cap.isOpened():
+            success, frame = self.cap.read()
+            
+            # Ensure the frame actually contains data before saving it
+            if success and frame is not None and frame.size > 0:
+                self.current_frame = frame
+
+    def update_terminal_camera(self):
+        # Stop loop if scanner was toggled off
+        if not getattr(self, 'scanner_active', False):
+            return
+
+        if hasattr(self, 'current_frame') and self.current_frame is not None:
+            try:
+                # Process the frame inside a try block
+                frame = self.current_frame.copy()
+                
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                decoded_objects = pyzbar.decode(gray_frame)
+
+                for obj in decoded_objects:
+                    barcode = obj.data.decode('utf-8')
+                    (x, y, w, h) = obj.rect
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                    current_time = time.time()
+                    if barcode != self.last_scanned or (current_time - self.last_scan_time) > 5.0:
+                        product = self.db.get_product_by_barcode(barcode)
+                        
+                        if product:
+                            self.last_scanned = barcode
+                            self.last_scan_time = current_time
+                            
+                            winsound.Beep(1500, 150)
+                            item_id, barcode_val, name, price, stock = product
+                            self.process_cart_addition(item_id, name, price, stock)
+                            
+                            cv2.putText(frame, "ADDED!", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                frame = cv2.resize(frame, (300, 400))
+                
+                cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(cv2image)
+                imgtk = ImageTk.PhotoImage(image=img)
+
+                self.lbl_video.imgtk = imgtk
+                self.lbl_video.configure(image=imgtk, text="") 
+
+            except Exception as e:
+                # If a frame is corrupted by a Wi-Fi drop, ignore it and skip to the next one
+                pass
+
+        # Update the UI without freezing
+        self.root.after(33, self.update_terminal_camera)
     def update_camera_frame(self):
         # Stop loop if camera is closed
         if not hasattr(self, 'cap') or not self.cap.isOpened():
@@ -325,7 +371,7 @@ class POSApp:
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
                 current_time = time.time()
-                if barcode != self.last_scanned or (current_time - self.last_scan_time) > 1.5:
+                if barcode != self.last_scanned or (current_time - self.last_scan_time) > 3.0:
                     
                     # 1. CART MODE: Only beep and add if item exists
                     if self.scan_mode == "cart":
