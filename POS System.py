@@ -143,7 +143,7 @@ class POSApp:
         self.tree.heading("ID", text="ID")
         self.tree.heading("Barcode", text="Barcode")
         self.tree.heading("Name", text="Product Name")
-        self.tree.heading("Price", text="Price ($)")
+        self.tree.heading("Price", text="Price (₱)")
         self.tree.heading("Stock", text="In Stock")
         
         self.tree.column("ID", width=40, anchor="center")
@@ -171,9 +171,10 @@ class POSApp:
         self.cart_listbox = tk.Listbox(right_frame, font=("Courier", 14))
         self.cart_listbox.pack(fill="both", expand=True, pady=10)
 
-        self.lbl_total = tk.Label(right_frame, text="Total: $0.00", font=("Arial", 26, "bold"), fg="#d32f2f")
-        self.lbl_total.pack(anchor="e", pady=15)
+        
+        self.cart_listbox.insert(tk.END, f"{info['name'][:20]:<20} x{info['qty']:<3} ₱{line_total:>7.2f}")
 
+        self.lbl_total.config(text=f"Total: ₱{total:.2f}")
         btn_frame = tk.Frame(right_frame)
         btn_frame.pack(fill="x", pady=10)
         
@@ -193,7 +194,8 @@ class POSApp:
     # --- FAST CONTINUOUS BARCODE SCANNER INTEGRATION ---
     def open_scanner(self):
         messagebox.showinfo("Scanner", "Camera active.\nHold a barcode to the camera to add it to the cart.\n\nPress 'q' to close the scanner.")
-        cap = cv2.VideoCapture(0)
+        camera_url = "http://192.168.1.28:8080/video" 
+        cap = cv2.VideoCapture(camera_url)
         
         # SPEED OPTIMIZATION 1: Lower resolution for faster processing
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -320,7 +322,7 @@ class POSApp:
         items_summary = ", ".join(summary_list)
         self.db.record_sale(items_summary, total_amount)
 
-        messagebox.showinfo("Checkout Success", f"Transaction complete!\nTotal Paid: ${total_amount:.2f}")
+        messagebox.showinfo("Checkout Success", f"Transaction complete!\nTotal Paid: ₱{total_amount:.2f}")
         
         self.clear_cart()
         self.refresh_inventory_table()
@@ -336,7 +338,7 @@ class POSApp:
         hist_tree = ttk.Treeview(history_window, columns=columns, show="headings")
         hist_tree.heading("Date", text="Date & Time")
         hist_tree.heading("Items", text="Purchased Items")
-        hist_tree.heading("Total", text="Total Paid ($)")
+        hist_tree.heading("Total", text="Total Paid (₱)")
         
         hist_tree.column("Date", width=150, anchor="center")
         hist_tree.column("Items", width=500)
@@ -369,6 +371,8 @@ class POSApp:
         tk.Label(form_frame, text="Barcode:").grid(row=1, column=0, sticky="e", padx=5, pady=5)
         self.entry_barcode = tk.Entry(form_frame, width=30)
         self.entry_barcode.grid(row=1, column=1, pady=5)
+
+        tk.Button(form_frame, text="📷 Scan to Fill", command=self.admin_scan_barcode, bg="#00BCD4", fg="white").grid(row=1, column=2, padx=10)
 
         tk.Label(form_frame, text="Product Name:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
         self.entry_name = tk.Entry(form_frame, width=30)
@@ -410,6 +414,65 @@ class POSApp:
     def close_admin_panel(self):
         self.refresh_inventory_table()
         self.admin_win.destroy()
+
+
+    def admin_scan_barcode(self):
+        messagebox.showinfo("Scanner", "Camera active.\nScan a barcode to register it.\n\nPress 'q' to cancel.")
+        camera_url = "http://192.168.1.28:8080/video" 
+        cap = cv2.VideoCapture(camera_url)
+        
+        # Lower resolution for faster processing
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        frame_counter = 0
+
+        while True:
+            success, frame = cap.read()
+            if not success:
+                messagebox.showerror("Camera Error", "Failed to grab frame.")
+                break
+
+            frame_counter += 1
+            
+            if frame_counter % 2 == 0:
+                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                decoded_objects = pyzbar.decode(gray_frame)
+
+                for obj in decoded_objects:
+                    barcode = obj.data.decode('utf-8')
+                    
+                    # Stop the camera immediately once a code is found
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    
+                    # Check if barcode already exists in database
+                    existing_product = self.db.get_product_by_barcode(barcode)
+                    if existing_product:
+                        messagebox.showwarning("Duplicate", f"Barcode {barcode} is already registered to '{existing_product[2]}'.")
+                        return
+
+                    # Auto-fill the admin form
+                    self.crud_clear_form()
+                    self.entry_barcode.insert(0, barcode)
+                    self.entry_name.focus() # Automatically move cursor to Name field
+                    
+                    # Optional: small notification that it worked
+                    # messagebox.showinfo("Scanned", f"Barcode {barcode} captured! Fill in the name, price, and stock.")
+                    return
+
+            # Draw instructions on the video feed
+            cv2.putText(frame, "Scan to Register (Press 'q' to quit)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.imshow("Inventory Scanner", frame)
+
+            # Keep the admin window updating
+            self.admin_win.update()
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
 
     def crud_refresh_list(self):
         for row in self.admin_tree.get_children():
