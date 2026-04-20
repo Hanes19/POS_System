@@ -6,6 +6,7 @@ import cv2
 import time
 from pyzbar import pyzbar
 import winsound
+from PIL import Image, ImageTk
 
 # --- DATABASE SETUP ---
 class POSDatabase:
@@ -122,6 +123,9 @@ class POSApp:
 
     def close_app(self):
         if messagebox.askyesno("Exit", "Are you sure you want to close the POS system?"):
+            # Turn off the camera safely before destroying the window
+            if hasattr(self, 'cap') and self.cap.isOpened():
+                self.cap.release()
             self.root.destroy()
 
     def build_ui(self):
@@ -158,12 +162,23 @@ class POSApp:
         scrollbar.pack(side="right", fill="y")
         self.tree.pack(fill="both", expand=True, pady=10)
 
-        # Action Buttons
-        btn_action_frame = tk.Frame(left_frame)
-        btn_action_frame.pack(fill="x", pady=5)
+        # --- NEW INTEGRATED CAMERA UI SECTION ---
+        action_and_cam_frame = tk.Frame(left_frame)
+        action_and_cam_frame.pack(fill="x", pady=5)
+
+        # The video feed label (resized to fit the screen nicely)
+        self.lbl_video = tk.Label(action_and_cam_frame, text="Scanner Offline", bg="black", fg="white", width=45, height=12)
+        self.lbl_video.pack(side="left", padx=(0, 10))
+
+        btn_action_frame = tk.Frame(action_and_cam_frame)
+        btn_action_frame.pack(side="left", fill="both", expand=True)
         
-        tk.Button(btn_action_frame, text="Add Selected to Cart", command=self.add_selected_to_cart, bg="#4CAF50", fg="white", font=("Arial", 14, "bold"), pady=10).pack(side="left", expand=True, fill="x", padx=5)
-        tk.Button(btn_action_frame, text="📷 Scan Barcode", command=self.open_scanner, bg="#00BCD4", fg="white", font=("Arial", 14, "bold"), pady=10).pack(side="left", expand=True, fill="x", padx=5)
+        tk.Button(btn_action_frame, text="Add Selected to Cart", command=self.add_selected_to_cart, bg="#4CAF50", fg="white", font=("Arial", 14, "bold"), pady=10).pack(fill="x", expand=True, pady=(0, 5))
+        
+        # Toggle Button for the embedded camera
+        self.btn_toggle_scan = tk.Button(btn_action_frame, text="📷 Turn On Scanner", command=self.toggle_terminal_scanner, bg="#00BCD4", fg="white", font=("Arial", 14, "bold"), pady=10)
+        self.btn_toggle_scan.pack(fill="x", expand=True, pady=(5, 0))
+        # ----------------------------------------
 
         # --- RIGHT PANEL: Shopping Cart ---
         right_frame = tk.LabelFrame(main_frame, text="Current Order", font=("Arial", 14, "bold"), padx=10, pady=10)
@@ -192,72 +207,164 @@ class POSApp:
         
         tk.Label(bottom_frame, text="Press ESC to toggle full screen", font=("Arial", 10, "italic"), fg="#555").pack(side="left")
 
-    # --- FAST CONTINUOUS BARCODE SCANNER INTEGRATION ---
-    def open_scanner(self):
-        messagebox.showinfo("Scanner", "Camera active.\nHold a barcode to the camera to add it to the cart.\n\nPress 'q' to close the scanner.")
-        camera_url = "http://192.168.1.28:8080/video" 
-        cap = cv2.VideoCapture(camera_url)
-        
-        # SPEED OPTIMIZATION 1: Lower resolution for faster processing
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        
-        last_scanned = None
-        last_scan_time = 0
-        frame_counter = 0
+    # --- INTEGRATED UI CAMERA SCANNER ---
+    def start_integrated_scanner(self, mode):
+        # Create a dedicated Tkinter window for the camera
+        self.scan_win = tk.Toplevel(self.root)
+        self.scan_win.title("Integrated Camera Scanner")
+        self.scan_win.geometry("680x600")
+        self.scan_win.grab_set() 
+        self.scan_win.configure(bg="#222")
 
-        while True:
-            success, frame = cap.read()
-            if not success:
-                messagebox.showerror("Camera Error", "Failed to grab frame.")
-                break
+        # Title Label
+        tk.Label(self.scan_win, text="Point Camera at Barcode", font=("Arial", 16, "bold"), bg="#222", fg="white").pack(pady=10)
 
-            frame_counter += 1
+        # This label will hold the live video feed
+        self.lbl_video = tk.Label(self.scan_win, bg="black")
+        self.lbl_video.pack()
+
+        # Close Button
+        tk.Button(self.scan_win, text="Close Camera", command=self.stop_integrated_scanner, bg="#F44336", fg="white", font=("Arial", 14, "bold")).pack(fill="x", padx=50, pady=15)
+
+        # Connect to phone camera
+        self.cap = cv2.VideoCapture("http://192.168.1.28:8080/video")
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        self.last_scanned = None
+        self.last_scan_time = 0
+        self.scan_mode = mode  # Tracks if we are adding to cart or adding to inventory
+
+        # If user clicks the red 'X' in the corner, close properly
+        self.scan_win.protocol("WM_DELETE_WINDOW", self.stop_integrated_scanner)
+
+        # Start the video loop
+        self.update_camera_frame()
+
+    # --- TERMINAL EMBEDDED SCANNER ---
+    def toggle_terminal_scanner(self):
+        # Check if scanner is currently off
+        if not getattr(self, 'scanner_active', False):
+            self.scanner_active = True
+            self.btn_toggle_scan.config(text="🛑 Turn Off Scanner", bg="#F44336")
             
-            # SPEED OPTIMIZATION 2: Skip frames to double the FPS
-            if frame_counter % 2 == 0:
-                # SPEED OPTIMIZATION 3: Convert to grayscale
-                gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                decoded_objects = pyzbar.decode(gray_frame)
+            # Start Camera
+            self.cap = cv2.VideoCapture("http://192.168.1.28:8080/video")
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            
+            self.last_scanned = None
+            self.last_scan_time = 0
+            
+            # Begin the loop
+            self.update_terminal_camera()
+        else:
+            # Turn it off
+            self.scanner_active = False
+            self.btn_toggle_scan.config(text="📷 Turn On Scanner", bg="#00BCD4")
+            if hasattr(self, 'cap') and self.cap.isOpened():
+                self.cap.release()
+            self.lbl_video.config(image='', text="Scanner Offline")
 
-                for obj in decoded_objects:
-                    barcode = obj.data.decode('utf-8')
-                    (x, y, w, h) = obj.rect
+    def update_terminal_camera(self):
+        # Stop loop if scanner was toggled off
+        if not getattr(self, 'scanner_active', False) or not self.cap.isOpened():
+            return
+
+        success, frame = self.cap.read()
+        if success:
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            decoded_objects = pyzbar.decode(gray_frame)
+
+            for obj in decoded_objects:
+                barcode = obj.data.decode('utf-8')
+                (x, y, w, h) = obj.rect
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                current_time = time.time()
+                if barcode != self.last_scanned or (current_time - self.last_scan_time) > 1.5:
+                    product = self.db.get_product_by_barcode(barcode)
                     
-                    # Draw targeting box so you know the camera is tracking
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    if product:
+                        self.last_scanned = barcode
+                        self.last_scan_time = current_time
+                        
+                        # Beep and add to cart directly!
+                        winsound.Beep(1500, 150)
+                        item_id, barcode_val, name, price, stock = product
+                        self.process_cart_addition(item_id, name, price, stock)
+                        
+                        cv2.putText(frame, "ADDED!", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                    current_time = time.time()
-                    if barcode != last_scanned or (current_time - last_scan_time) > 1.5:
-                        
-                        # Check the database FIRST
+            # Resize the frame so it fits nicely in our Tkinter UI without stretching the window
+            frame = cv2.resize(frame, (320, 240))
+            
+            # Convert for Tkinter
+            cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(cv2image)
+            imgtk = ImageTk.PhotoImage(image=img)
+
+            self.lbl_video.imgtk = imgtk
+            self.lbl_video.configure(image=imgtk)
+
+        # Loop the function every 15 milliseconds
+        self.root.after(15, self.update_terminal_camera)
+    def update_camera_frame(self):
+        # Stop loop if camera is closed
+        if not hasattr(self, 'cap') or not self.cap.isOpened():
+            return
+
+        success, frame = self.cap.read()
+        if success:
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            decoded_objects = pyzbar.decode(gray_frame)
+
+            for obj in decoded_objects:
+                barcode = obj.data.decode('utf-8')
+                (x, y, w, h) = obj.rect
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                current_time = time.time()
+                if barcode != self.last_scanned or (current_time - self.last_scan_time) > 1.5:
+                    
+                    # 1. CART MODE: Only beep and add if item exists
+                    if self.scan_mode == "cart":
                         product = self.db.get_product_by_barcode(barcode)
-                        
-                        # Only proceed if the product is actually registered in the database
                         if product:
-                            last_scanned = barcode
-                            last_scan_time = current_time
-                            
-                            # Play the beep ONLY for registered items
+                            self.last_scanned = barcode
+                            self.last_scan_time = current_time
                             winsound.Beep(1500, 150)
-                            
-                            # Add to cart directly
                             item_id, barcode_val, name, price, stock = product
                             self.process_cart_addition(item_id, name, price, stock)
                             
-                            cv2.putText(frame, "SCANNED!", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            # Draw instructions
-            cv2.putText(frame, "Active: Press 'q' to quit", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.imshow("Scanner (Press 'q' to quit)", frame)
+                    # 2. ADMIN MODE: Beep and auto-fill if it's a NEW item
+                    elif self.scan_mode == "admin":
+                        existing_product = self.db.get_product_by_barcode(barcode)
+                        if existing_product:
+                            self.last_scanned = barcode
+                            self.last_scan_time = current_time
+                            messagebox.showwarning("Duplicate", f"Barcode {barcode} is already registered!")
+                        else:
+                            winsound.Beep(1500, 150)
+                            self.crud_clear_form()
+                            self.entry_barcode.insert(0, barcode)
+                            self.entry_name.focus()
+                            self.stop_integrated_scanner() # Close the camera automatically!
+                            return 
 
-            # Important: Keep the Tkinter GUI updating so the cart shows new items live!
-            self.root.update()
+            # Convert the OpenCV BGR frame to an RGB image for Tkinter
+            cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(cv2image)
+            imgtk = ImageTk.PhotoImage(image=img)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            # Update the label with the new frame
+            self.lbl_video.imgtk = imgtk
+            self.lbl_video.configure(image=imgtk)
 
-        cap.release()
-        cv2.destroyAllWindows()
+        # Request the next frame repeatedly without pausing the UI
+        self.scan_win.after(15, self.update_camera_frame)
+
+
 
     def handle_scanned_barcode(self, barcode):
         product = self.db.get_product_by_barcode(barcode)
@@ -383,7 +490,7 @@ class POSApp:
         self.entry_barcode = tk.Entry(form_frame, width=30)
         self.entry_barcode.grid(row=1, column=1, pady=5)
 
-        tk.Button(form_frame, text="📷 Scan to Fill", command=self.admin_scan_barcode, bg="#00BCD4", fg="white").grid(row=1, column=2, padx=10)
+        tk.Button(form_frame, text="📷 Scan to Fill", command=lambda: self.start_integrated_scanner("admin"), bg="#00BCD4", fg="white").grid(row=1, column=2, padx=10)
 
         tk.Label(form_frame, text="Product Name:").grid(row=2, column=0, sticky="e", padx=5, pady=5)
         self.entry_name = tk.Entry(form_frame, width=30)
