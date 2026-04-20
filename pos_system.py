@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import sqlite3
 import datetime
-import os                                     
+import os                             
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
 import cv2
 import time
@@ -10,6 +10,7 @@ from pyzbar import pyzbar
 import winsound
 from PIL import Image, ImageTk
 import threading
+import hashlib
 
 # --- DATABASE SETUP ---
 class POSDatabase:
@@ -39,6 +40,21 @@ class POSDatabase:
                 total_amount REAL NOT NULL
             )
         """)
+
+        # Users Table (REQUIRED FOR LOGIN)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL
+            )
+        """)
+        
+        # Create a default admin user if the users table is empty
+        self.cursor.execute("SELECT COUNT(*) FROM users")
+        if self.cursor.fetchone()[0] == 0:
+            hashed_pw = hashlib.sha256("admin123".encode()).hexdigest()
+            self.cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", ("admin", hashed_pw))
         
         # Reset ID sequence to 1 if table is completely empty
         self.cursor.execute("SELECT COUNT(*) FROM products")
@@ -49,6 +65,13 @@ class POSDatabase:
                 pass 
                 
         self.conn.commit()
+
+    # --- THIS IS THE METHOD IT WAS MISSING ---
+    def verify_login(self, username, password):
+        """Verifies if the entered username and password are correct."""
+        hashed_pw = hashlib.sha256(password.encode()).hexdigest()
+        self.cursor.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, hashed_pw))
+        return self.cursor.fetchone() is not None
 
     # --- INVENTORY CRUD OPERATIONS ---
     def get_inventory(self):
@@ -718,6 +741,7 @@ class POSApp:
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
+    # Boot the main POS application directly if this file is run
     root = tk.Tk()
     app = POSApp(root)
     root.mainloop()
