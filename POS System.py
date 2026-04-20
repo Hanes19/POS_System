@@ -224,22 +224,28 @@ class POSApp:
                     barcode = obj.data.decode('utf-8')
                     (x, y, w, h) = obj.rect
                     
-                    # Draw targeting box
+                    # Draw targeting box so you know the camera is tracking
                     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-                    # --- NEW LOGIC: 1.5-second cooldown and Beep Sound ---
                     current_time = time.time()
                     if barcode != last_scanned or (current_time - last_scan_time) > 1.5:
-                        last_scanned = barcode
-                        last_scan_time = current_time
                         
-                        # Play a scanner beep (Frequency: 1500Hz, Duration: 150 milliseconds)
-                        winsound.Beep(1500, 150)
+                        # Check the database FIRST
+                        product = self.db.get_product_by_barcode(barcode)
                         
-                        self.handle_scanned_barcode(barcode)
-                    # -----------------------------------------------------
-                    
-                    cv2.putText(frame, "SCANNED!", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        # Only proceed if the product is actually registered in the database
+                        if product:
+                            last_scanned = barcode
+                            last_scan_time = current_time
+                            
+                            # Play the beep ONLY for registered items
+                            winsound.Beep(1500, 150)
+                            
+                            # Add to cart directly
+                            item_id, barcode_val, name, price, stock = product
+                            self.process_cart_addition(item_id, name, price, stock)
+                            
+                            cv2.putText(frame, "SCANNED!", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             # Draw instructions
             cv2.putText(frame, "Active: Press 'q' to quit", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.imshow("Scanner (Press 'q' to quit)", frame)
