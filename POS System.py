@@ -5,6 +5,7 @@ import datetime
 import cv2
 import time
 from pyzbar import pyzbar
+import winsound
 
 # --- DATABASE SETUP ---
 class POSDatabase:
@@ -171,10 +172,10 @@ class POSApp:
         self.cart_listbox = tk.Listbox(right_frame, font=("Courier", 14))
         self.cart_listbox.pack(fill="both", expand=True, pady=10)
 
-        
-        self.cart_listbox.insert(tk.END, f"{info['name'][:20]:<20} x{info['qty']:<3} ₱{line_total:>7.2f}")
+        # This was accidentally deleted - it creates the total label on startup
+        self.lbl_total = tk.Label(right_frame, text="Total: ₱0.00", font=("Arial", 26, "bold"), fg="#d32f2f")
+        self.lbl_total.pack(anchor="e", pady=15)
 
-        self.lbl_total.config(text=f"Total: ₱{total:.2f}")
         btn_frame = tk.Frame(right_frame)
         btn_frame.pack(fill="x", pady=10)
         
@@ -226,15 +227,19 @@ class POSApp:
                     # Draw targeting box
                     cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-                    # 2-second timeout to prevent scanning the same barcode rapidly
+                    # --- NEW LOGIC: 1.5-second cooldown and Beep Sound ---
                     current_time = time.time()
-                    if barcode != last_scanned or (current_time - last_scan_time) > 2.0:
+                    if barcode != last_scanned or (current_time - last_scan_time) > 1.5:
                         last_scanned = barcode
                         last_scan_time = current_time
+                        
+                        # Play a scanner beep (Frequency: 1500Hz, Duration: 150 milliseconds)
+                        winsound.Beep(1500, 150)
+                        
                         self.handle_scanned_barcode(barcode)
+                    # -----------------------------------------------------
                     
                     cv2.putText(frame, "SCANNED!", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
             # Draw instructions
             cv2.putText(frame, "Active: Press 'q' to quit", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.imshow("Scanner (Press 'q' to quit)", frame)
@@ -298,9 +303,9 @@ class POSApp:
         for item_id, info in self.cart.items():
             line_total = info["price"] * info["qty"]
             total += line_total
-            self.cart_listbox.insert(tk.END, f"{info['name'][:20]:<20} x{info['qty']:<3} ${line_total:>7.2f}")
+            self.cart_listbox.insert(tk.END, f"{info['name'][:20]:<20} x{info['qty']:<3} ₱{line_total:>7.2f}")
 
-        self.lbl_total.config(text=f"Total: ${total:.2f}")
+        self.lbl_total.config(text=f"Total: ₱{total:.2f}")
 
     def clear_cart(self):
         self.cart.clear()
