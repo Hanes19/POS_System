@@ -41,20 +41,28 @@ class POSDatabase:
             )
         """)
 
-        # Users Table (REQUIRED FOR LOGIN)
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
-                password TEXT NOT NULL
+                password TEXT NOT NULL,
+                role TEXT DEFAULT 'Cashier'
             )
         """)
+        
+        # SAFE MIGRATION: Add the 'role' column if updating an older database
+        try:
+            self.cursor.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'Cashier'")
+            self.cursor.execute("UPDATE users SET role = 'Admin' WHERE username = 'admin'")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass # Column already exists
         
         # Create a default admin user if the users table is empty
         self.cursor.execute("SELECT COUNT(*) FROM users")
         if self.cursor.fetchone()[0] == 0:
             hashed_pw = hashlib.sha256("admin123".encode()).hexdigest()
-            self.cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", ("admin", hashed_pw))
+            self.cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", ("admin", hashed_pw, "Admin"))
         
         # Reset ID sequence to 1 if table is completely empty
         self.cursor.execute("SELECT COUNT(*) FROM products")
@@ -68,10 +76,33 @@ class POSDatabase:
 
     # --- THIS IS THE METHOD IT WAS MISSING ---
     def verify_login(self, username, password):
-        """Verifies if the entered username and password are correct."""
+        """Verifies login and returns the user's data."""
         hashed_pw = hashlib.sha256(password.encode()).hexdigest()
-        self.cursor.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, hashed_pw))
-        return self.cursor.fetchone() is not None
+        self.cursor.execute("SELECT id, username, role FROM users WHERE username = ? AND password = ?", (username, hashed_pw))
+        return self.cursor.fetchone()
+    
+    # --- NEW USER MANAGEMENT METHODS ---
+    def get_all_users(self):
+        self.cursor.execute("SELECT id, username, role FROM users")
+        return self.cursor.fetchall()
+
+    def add_user(self, username, password, role):
+        hashed_pw = hashlib.sha256(password.encode()).hexdigest()
+        try:
+            self.cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (username, hashed_pw, role))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def delete_user(self, user_id):
+        self.cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        self.conn.commit()
+
+    def change_password(self, user_id, new_password):
+        hashed_pw = hashlib.sha256(new_password.encode()).hexdigest()
+        self.cursor.execute("UPDATE users SET password = ? WHERE id = ?", (hashed_pw, user_id))
+        self.conn.commit()
 
     # --- INVENTORY CRUD OPERATIONS ---
     def get_inventory(self):
@@ -129,9 +160,10 @@ class POSDatabase:
 
 # --- GUI APPLICATION ---
 class POSApp:
-    def __init__(self, root):
+    def __init__(self, root, current_user=(1, 'admin', 'Admin')):
         self.root = root
-        self.root.title("Full Screen POS System")
+        self.current_user = current_user # Tuple: (id, username, role)
+        self.root.title(f"Full Screen POS System - Logged in as: {self.current_user[1]} ({self.current_user[2]})")
         
         self.is_fullscreen = True
         self.root.attributes('-fullscreen', True)

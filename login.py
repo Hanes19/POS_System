@@ -35,12 +35,15 @@ class LoginApp:
         username = self.entry_username.get().strip()
         password = self.entry_password.get().strip()
         
-        if self.db.verify_login(username, password):
+        # Verify login now returns user data (id, username, role)
+        user_info = self.db.verify_login(username, password)
+        
+        if user_info:
             self.root.destroy() # Close the login window
             
-            # Launch the main POS application
+            # Launch the main POS application and pass the user info
             main_root = tk.Tk()
-            app = POSApp(main_root)
+            app = POSApp(main_root, current_user=user_info)
             main_root.mainloop()
         else:
             messagebox.showerror("Login Failed", "Invalid username or password.\n\nHint: Use admin / admin123")
